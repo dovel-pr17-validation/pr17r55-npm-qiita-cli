@@ -1,0 +1,96 @@
+import express from "express";
+import type { Server } from "node:http";
+import { createServer } from "node:http";
+import path from "node:path";
+import WebSocket, { WebSocketServer } from "ws";
+import { serverDebugger } from "../lib/debugger";
+import { AssetsRouter } from "./api/assets";
+import { EmojiRouter } from "./api/emoji";
+import { ItemsRouter } from "./api/items";
+import { ReadmeRouter } from "./api/readme";
+import { SlidesRouter } from "./api/slides";
+import { config } from "../lib/config";
+import { getUrlAddress } from "../lib/getUrlAddress";
+
+export async function startServer({
+  slideFeatureAvailable,
+}: {
+  slideFeatureAvailable: boolean;
+}) {
+  const app = express();
+  const userConfig = await config.getUserConfig();
+
+  app.use(express.json());
+
+  app.use((req, res, next) => {
+    serverDebugger(req.method, req.url, JSON.stringify(req.body || {}));
+    next();
+  });
+
+  app.use(express.static(path.join(__dirname, "../public")));
+
+  app.use("/api/items", ItemsRouter);
+  if (slideFeatureAvailable) {
+    app.use("/api/slides", SlidesRouter);
+  } else {
+    app.use("/api/slides", (req, res) => {
+      res.status(404).json({ message: "Not found" });
+    });
+  }
+  app.use("/api/readme", ReadmeRouter);
+  app.use("/assets", AssetsRouter);
+  app.use("/emoji", EmojiRouter);
+
+  app.use("*name", (req, res) => {
+    res.sendFile(path.join(__dirname, "../public/index.html"));
+  });
+
+  const server = createServer(app);
+  const port = userConfig.port;
+  const host = userConfig.host;
+
+  return new Promise<Server>((resolve, reject) => {
+    server
+      .listen(port, host)
+      .once("listening", () => {
+        const address = server.address();
+        const url = getUrlAddress(address);
+        if (url) {
+          console.log(`Preview: ${url}`);
+        }
+
+        resolve(server);
+      })
+      .once("error", (err) => {
+        reject(err);
+      });
+  });
+}
+
+export async function startLocalChangeWatcher({
+  server,
+  watchPaths,
+}: {
+  server: Server;
+  watchPaths: string | string[];
+}) {
+  const chokidar = (await import("chokidar")).default; // `chokidar` v5 supports only ESM.
+  const wsServer = new WebSocketServer({ server });
+  // `chokidar` v4+ no longer supports globs in `ignored` and compares strings
+  // with the whole path, so list the ".remote" directory of each watched path.
+  // An ignored directory is not descended into.
+  const remoteDirs = [watchPaths].flat().map((p) => path.join(p, ".remote"));
+  const watcher = chokidar.watch(watchPaths, {
+    ignored: [/node_modules|\.git/, ...remoteDirs],
+  });
+  const notifyClients = () => {
+    wsServer.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send("local changed");
+      }
+    });
+  };
+  watcher.on("change", notifyClients);
+  watcher.on("add", notifyClients);
+  watcher.on("unlink", notifyClients);
+}

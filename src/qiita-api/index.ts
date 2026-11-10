@@ -1,0 +1,435 @@
+import { URL, URLSearchParams } from "node:url";
+import {
+  QiitaBadRequestError,
+  QiitaBetaFeatureRequiredError,
+  QiitaFetchError,
+  QiitaForbiddenError,
+  QiitaInternalServerError,
+  QiitaNotFoundError,
+  QiitaRateLimitError,
+  QiitaUnauthorizedError,
+  QiitaUnknownError,
+  QiitaUnprocessableEntityError,
+} from "./errors";
+import { qiitaApiDebugger } from "./lib/debugger";
+
+export * from "./errors";
+
+export interface Item {
+  body: string;
+  id: string;
+  private: boolean;
+  tags: {
+    name: string;
+  }[];
+  title: string;
+  organization_url_name: string | null;
+  coediting: boolean;
+  created_at: string;
+  updated_at: string;
+  slide: boolean;
+  posting_campaign_uuid: string | null;
+}
+
+export const slideVisibilityTypes = [
+  "public",
+  "only_me",
+  "url",
+  "members_only",
+] as const;
+
+export interface SlideVisibility {
+  type: (typeof slideVisibilityTypes)[number];
+  url_names?: string[];
+}
+
+export interface Slide {
+  uuid: string;
+  title: string;
+  markdown: string;
+  description_markdown: string;
+  created_at: string;
+  updated_at: string;
+  url: string;
+  visibility: SlideVisibility;
+}
+
+export interface SlidePreview {
+  pages: { html: string; speaker_note: string[] }[];
+  css: string;
+}
+
+export interface PostingCampaign {
+  uuid: string;
+  title: string;
+  banner_url: string | null;
+  link_url: string;
+  term_url: string;
+  start_at: string;
+  end_at: string;
+  is_after_end: boolean;
+}
+
+export class QiitaApi {
+  private readonly token: string;
+  private readonly userAgent: string;
+
+  static agentName = "QiitaApi";
+  static version = "0.0.1";
+
+  constructor({ token, userAgent }: { token: string; userAgent?: string }) {
+    this.token = token;
+    this.userAgent = userAgent ? userAgent : QiitaApi.defaultUserAgent();
+  }
+
+  static defaultUserAgent() {
+    return `${QiitaApi.agentName}/${QiitaApi.version}`;
+  }
+
+  private getUrlScheme() {
+    return "https";
+  }
+
+  private getDomainName() {
+    return process.env.QIITA_DOMAIN ? process.env.QIITA_DOMAIN : "qiita.com";
+  }
+
+  private getBaseUrl() {
+    const hostname = this.getDomainName();
+    return `${this.getUrlScheme()}://${hostname}/`;
+  }
+
+  private getPreviewUrl() {
+    return `${this.getUrlScheme()}://${this.getDomainName()}`;
+  }
+
+  private async request<T = unknown>(url: string, options: RequestInit) {
+    let response;
+
+    try {
+      qiitaApiDebugger(`request to`, url, JSON.stringify(options));
+
+      response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json",
+          "User-Agent": this.userAgent,
+        },
+        ...options,
+      });
+    } catch (err) {
+      console.error(err);
+      throw new QiitaFetchError((err as Error).message);
+    }
+
+    if (response.ok) {
+      const body = await response.text();
+
+      try {
+        return JSON.parse(body) as T;
+      } catch {
+        return body as T;
+      }
+    }
+
+    const responseBody = await response.text();
+    if (qiitaApiDebugger.enabled) {
+      qiitaApiDebugger(
+        "request failed",
+        JSON.stringify({
+          status: response.status,
+          responseBody,
+        }),
+      );
+    }
+
+    const errorMessage = responseBody.slice(0, 100);
+    switch (response.status) {
+      case 400:
+        throw new QiitaBadRequestError(errorMessage);
+      case 401:
+        throw new QiitaUnauthorizedError(errorMessage);
+      case 403:
+        if (QiitaApi.isBetaFeatureRequired(responseBody)) {
+          throw new QiitaBetaFeatureRequiredError(errorMessage);
+        }
+        throw new QiitaForbiddenError(errorMessage);
+      case 404:
+        throw new QiitaNotFoundError(errorMessage);
+      case 422:
+        throw new QiitaUnprocessableEntityError(errorMessage);
+      case 429:
+        throw new QiitaRateLimitError(errorMessage);
+      case 500:
+        throw new QiitaInternalServerError(errorMessage);
+      default:
+        throw new QiitaUnknownError(errorMessage);
+    }
+  }
+
+  private static isBetaFeatureRequired(responseBody: string) {
+    try {
+      return JSON.parse(responseBody).type === "beta_feature_required";
+    } catch {
+      return false;
+    }
+  }
+
+  private generateApiUrl(path: string) {
+    const baseUrl =
+      path === "/api/preview" ? this.getPreviewUrl() : this.getBaseUrl();
+    return new URL(path, baseUrl).toString();
+  }
+
+  private async get<T = unknown>(path: string, options?: RequestInit) {
+    const url = this.generateApiUrl(path);
+    return await this.request<T>(url, {
+      ...options,
+      method: "GET",
+    });
+  }
+
+  private async post<T = unknown>(path: string, options?: RequestInit) {
+    const url = this.generateApiUrl(path);
+    return await this.request<T>(url, {
+      ...options,
+      method: "POST",
+    });
+  }
+
+  private async patch<T = unknown>(path: string, options?: RequestInit) {
+    const url = this.generateApiUrl(path);
+    return await this.request<T>(url, {
+      ...options,
+      method: "PATCH",
+    });
+  }
+
+  async authenticatedUser() {
+    return await this.get<{ id: string }>("/api/v2/authenticated_user");
+  }
+
+  private static paginationParams(page?: number, per?: number) {
+    const params = new URLSearchParams();
+    if (page !== undefined) {
+      params.set("page", page.toString());
+    }
+    if (per !== undefined) {
+      params.set("per_page", per.toString());
+    }
+
+    return params;
+  }
+
+  async authenticatedUserItems(page?: number, per?: number) {
+    const params = QiitaApi.paginationParams(page, per);
+    const path = `/api/v2/authenticated_user/items?${params}`;
+
+    return await this.get<Item[]>(path);
+  }
+
+  async authenticatedUserSlides(page?: number, per?: number) {
+    const params = QiitaApi.paginationParams(page, per);
+    const path = `/api/v2/authenticated_user/slides?${params}`;
+
+    return await this.get<Slide[]>(path);
+  }
+
+  async preview(rawBody: string) {
+    const body = JSON.stringify({
+      parser_type: "qiita_cli",
+      raw_body: rawBody,
+    });
+
+    return await this.post<string>("/api/preview", {
+      body,
+    });
+  }
+
+  async items(page?: number, per?: number, query?: string) {
+    const params = new URLSearchParams();
+    if (page !== undefined) {
+      params.set("page", page.toString());
+    }
+    if (per !== undefined) {
+      params.set("per_page", per.toString());
+    }
+    if (query !== undefined) {
+      params.set("query", query);
+    }
+
+    const path = `/api/v2/items?${params}`;
+
+    return await this.get<Item[]>(path);
+  }
+
+  async postItem({
+    rawBody,
+    tags,
+    title,
+    isPrivate,
+    organizationUrlName,
+    slide,
+    postingCampaignUuid,
+    agreedPostingCampaignTerm,
+  }: {
+    rawBody: string;
+    tags: string[];
+    title: string;
+    isPrivate: boolean;
+    organizationUrlName: string | null;
+    slide: boolean;
+    postingCampaignUuid: string | null | undefined;
+    agreedPostingCampaignTerm: boolean | undefined;
+  }) {
+    const data = JSON.stringify({
+      body: rawBody,
+      title,
+      tags: tags.map((name) => {
+        return {
+          name,
+          versions: [],
+        };
+      }),
+      private: isPrivate,
+      organization_url_name: organizationUrlName,
+      slide,
+      posting_campaign_uuid: postingCampaignUuid,
+      agreed_posting_campaign_term: agreedPostingCampaignTerm,
+    });
+
+    const path = `/api/v2/items`;
+
+    return await this.post<Item>(path, {
+      body: data,
+    });
+  }
+
+  async patchItem({
+    uuid,
+    rawBody,
+    title,
+    tags,
+    isPrivate,
+    organizationUrlName,
+    slide,
+    postingCampaignUuid,
+    agreedPostingCampaignTerm,
+  }: {
+    uuid: string;
+    rawBody: string;
+    title: string;
+    tags: string[];
+    isPrivate: boolean;
+    organizationUrlName: string | null;
+    slide: boolean;
+    postingCampaignUuid: string | null | undefined;
+    agreedPostingCampaignTerm: boolean | undefined;
+  }) {
+    const data = JSON.stringify({
+      body: rawBody,
+      title,
+      tags: tags.map((name) => {
+        return {
+          name,
+          versions: [],
+        };
+      }),
+      private: isPrivate,
+      organization_url_name: organizationUrlName,
+      slide,
+      posting_campaign_uuid: postingCampaignUuid,
+      agreed_posting_campaign_term: agreedPostingCampaignTerm,
+    });
+
+    const path = `/api/v2/items/${uuid}`;
+
+    return await this.patch<Item>(path, {
+      body: data,
+    });
+  }
+
+  // `description` is intentionally typed as `string`: the API rejects a
+  // present-but-null `description` with 400, so callers must normalize it.
+  async postSlide({
+    title,
+    markdown,
+    description,
+    visibility,
+  }: {
+    title: string;
+    markdown: string;
+    description: string;
+    visibility: SlideVisibility;
+  }) {
+    const data = JSON.stringify({
+      title,
+      body: markdown,
+      description,
+      visibility,
+    });
+
+    return await this.post<Slide>(`/api/v2/slides`, {
+      body: data,
+    });
+  }
+
+  async patchSlide({
+    uuid,
+    title,
+    markdown,
+    description,
+    visibility,
+  }: {
+    uuid: string;
+    title: string;
+    markdown: string;
+    description: string;
+    visibility: SlideVisibility;
+  }) {
+    const data = JSON.stringify({
+      title,
+      body: markdown,
+      description,
+      visibility,
+    });
+
+    return await this.patch<Slide>(`/api/v2/slides/${uuid}`, {
+      body: data,
+    });
+  }
+
+  async previewSlide(rawBody: string) {
+    const data = JSON.stringify({
+      body: rawBody,
+    });
+
+    return await this.post<SlidePreview>(`/api/v2/slide_previews`, {
+      body: data,
+    });
+  }
+
+  async postingCampaigns(page?: number, per?: number) {
+    const params = new URLSearchParams();
+    if (page !== undefined) {
+      params.set("page", page.toString());
+    }
+    if (per !== undefined) {
+      params.set("per_page", per.toString());
+    }
+
+    const path = `/api/v2/posting-campaigns?${params}`;
+
+    return await this.get<PostingCampaign[]>(path);
+  }
+
+  async postingCampaign(uuid: string) {
+    const path = `/api/v2/posting-campaigns/${uuid}`;
+
+    return await this.get<PostingCampaign>(path);
+  }
+
+  async getAssetUrls() {
+    return await this.get<{ [key: string]: string }>("/api/qiita-cli/assets");
+  }
+}

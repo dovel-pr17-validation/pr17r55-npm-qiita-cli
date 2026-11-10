@@ -1,0 +1,36 @@
+export const helpText = `USAGE:
+qiita <COMMAND> [<OPTIONS>]
+
+COMMAND:
+  init                    記事をGitHubで管理するための初期設定
+  login                   Qiita APIの認証認可
+  new [<basename>] ...    新しい記事を追加
+  new --slide [<basename>] ...
+                          新しいスライドを追加（Qiitaのベータ版を利用しているユーザーのみ）
+  preview                 コンテンツをブラウザでプレビュー
+  publish <basename> ...  記事、スライドを投稿、更新
+  publish --all           全ての記事、スライドを投稿、更新
+  pull                    記事、スライドファイルをQiitaと同期
+  posting-campaigns       開催中の記事投稿キャンペーン一覧を表示（最大100件）
+  version                 Qiita CLIのバージョンを表示
+  help                    ヘルプを表示
+
+OPTIONS:
+  --credential <credential_dir>
+    Qiita CLIの認証情報を配置するディレクトリを指定
+
+  --root <root_dir>
+    記事ファイルをダウンロードするディレクトリを指定
+
+  --verbose
+    詳細表示オプションを有効
+
+  --config
+    設定ファイルを配置するディレクトリを指定
+
+詳細についてはReadme(https://github.com/increments/qiita-cli)をご覧ください
+`;
+
+export const help = () => {
+  console.log(helpText);
+};

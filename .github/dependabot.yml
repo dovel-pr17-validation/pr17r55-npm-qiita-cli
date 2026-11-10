@@ -1,0 +1,62 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "github-actions"
+    directory: "/actions/publish"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      timezone: "Asia/Tokyo"
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    ignore:
+      # bump major version manually to match node version in package.json
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      debug:
+        patterns:
+          - "@types/debug"
+          - "debug"
+      express:
+        patterns:
+          - "@types/express"
+          - "express"
+      jest:
+        patterns:
+          - "@types/jest"
+          - "jest"
+      react:
+        patterns:
+          - "@types/react"
+          - "@types/react-dom"
+          - "react"
+          - "react-dom"
+      typescript-eslint:
+        patterns:
+          - "@typescript-eslint/*"
+      ws:
+        patterns:
+          - "@types/ws"
+          - "ws"

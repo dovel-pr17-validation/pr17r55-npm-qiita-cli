@@ -1,0 +1,827 @@
+import matter from "gray-matter";
+import fs from "node:fs/promises";
+import { Item, QiitaApi } from "../qiita-api";
+import { QiitaItem } from "./entities/qiita-item";
+import { FileSystemRepo } from "./file-system-repo";
+
+jest.mock("node:fs/promises");
+
+afterEach(() => {
+  jest.resetAllMocks();
+});
+
+const dataRootDir = "data_root_dir";
+const rootPath = `${dataRootDir}/public`;
+const remotePath = `${rootPath}/.remote`;
+
+const articleFile = ({
+  id = null,
+  body = "# Title",
+  ignorePublish = "false",
+}: { id?: string | null; body?: string; ignorePublish?: string } = {}) => `---
+title: Title
+tags:
+  - qiita
+private: false
+updated_at: ''
+id: ${id === null ? "null" : id}
+organization_url_name: null
+slide: false
+ignorePublish: ${ignorePublish}
+---
+${body}
+`;
+
+const buildItem = (
+  overrides: Partial<ConstructorParameters<typeof QiitaItem>[0]> = {},
+) =>
+  new QiitaItem({
+    id: null,
+    title: "Title",
+    tags: ["qiita"],
+    secret: false,
+    updatedAt: "",
+    organizationUrlName: null,
+    rawBody: "# Title",
+    name: "article",
+    modified: true,
+    isOlderThanRemote: false,
+    itemsShowPath: "/items/show?basename=article",
+    published: false,
+    itemPath: `${rootPath}/article.md`,
+    slide: false,
+    ignorePublish: false,
+    postingCampaignUuid: null,
+    agreedPostingCampaignTerm: false,
+    ...overrides,
+  });
+
+const buildResponseItem = (overrides: Partial<Item> = {}): Item => ({
+  id: "new-item-id",
+  title: "Title",
+  body: "# Title",
+  tags: [{ name: "qiita" }],
+  private: false,
+  organization_url_name: null,
+  coediting: false,
+  created_at: "2026-09-01T00:00:00+09:00",
+  updated_at: "2026-09-01T00:00:00+09:00",
+  slide: false,
+  posting_campaign_uuid: null,
+  ...overrides,
+});
+
+const mockFileSystem = (files: Record<string, string>) => {
+  const mockFs = fs as jest.Mocked<typeof fs>;
+  mockFs.readdir.mockImplementation(async (dirPath) => {
+    const prefix = `${dirPath}/`;
+    return Object.keys(files)
+      .filter((filePath) => filePath.startsWith(prefix))
+      .map((filePath) => filePath.slice(prefix.length)) as any[];
+  });
+  mockFs.readFile.mockImplementation(async (filePath) => {
+    const content = files[filePath as string];
+    if (content === undefined) {
+      throw new Error(`ENOENT: ${filePath}`);
+    }
+    return content;
+  });
+  mockFs.writeFile.mockImplementation(async (filePath, data) => {
+    files[filePath as string] = data as string;
+  });
+  return files;
+};
+
+const writtenPaths = () =>
+  (fs as jest.Mocked<typeof fs>).writeFile.mock.calls.map((call) =>
+    String(call[0]),
+  );
+
+const buildQiitaApi = () =>
+  ({
+    postItem: jest.fn(),
+    patchItem: jest.fn(),
+  }) as unknown as jest.Mocked<QiitaApi>;
+
+describe("FileSystemRepo", () => {
+  describe("constructor", () => {
+    it("creates", () => {
+      const dataRootDir = "data_root_dir";
+      const subject = () => {
+        return new FileSystemRepo({ dataRootDir });
+      };
+      expect(subject()).toBeInstanceOf(FileSystemRepo);
+    });
+  });
+
+  describe("loadItemByItemId()", () => {
+    it("returns item", () => {
+      const mockFs = fs as jest.Mocked<typeof fs>;
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const dataRootDir = "data_root_dir";
+      const subDir = "public";
+      const instance = new FileSystemRepo({ dataRootDir });
+      const itemId = "abc";
+      const subject = () => {
+        return instance.loadItemByItemId(itemId);
+      };
+
+      expect(mockFs.readdir.mock.calls).toHaveLength(0);
+      return subject().then((item) => {
+        expect(item).toBeNull();
+        expect(mockFs.readdir.mock.calls).toHaveLength(1);
+        expect(mockFs.readdir.mock.calls[0][0]).toBe(
+          `${dataRootDir}/${subDir}`,
+        );
+      });
+    });
+
+    describe("when found item", () => {
+      it("returns item", () => {
+        const dataRootDir = "data_root_dir";
+        const subDir = "public";
+        const instance = new FileSystemRepo({ dataRootDir });
+        const itemId = "abc";
+        const subject = () => {
+          return instance.loadItemByItemId(itemId);
+        };
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        // cast any why jest.mock cannot treat overloaded type. they resolve forcefully last one.
+        const filename = "something.md";
+        mockFs.readdir.mockResolvedValueOnce([filename] as any[]);
+        mockFs.readFile.mockResolvedValue(`---
+id: ${itemId}
+tags: []
+---`);
+
+        expect(mockFs.readdir.mock.calls).toHaveLength(0);
+        return subject().then((item) => {
+          expect(item?.id).toBe(itemId);
+          expect(mockFs.readdir.mock.calls).toHaveLength(1);
+          expect(mockFs.readdir.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}`,
+          );
+          expect(mockFs.readFile.mock.calls).toHaveLength(2);
+          expect(mockFs.readFile.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}/${filename}`,
+          );
+          expect(mockFs.readFile.mock.calls[1][0]).toBe(
+            `${dataRootDir}/${subDir}/.remote/${itemId}.md`,
+          );
+        });
+      });
+    });
+  });
+
+  describe("loadItemByBasename()", () => {
+    it("returns item", () => {
+      const mockFs = fs as jest.Mocked<typeof fs>;
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const dataRootDir = "data_root_dir";
+      const subDir = "public";
+      const instance = new FileSystemRepo({ dataRootDir });
+      const basename = "abc";
+      const subject = () => {
+        return instance.loadItemByBasename(basename);
+      };
+
+      expect(mockFs.readdir.mock.calls).toHaveLength(0);
+      return subject().then((item) => {
+        expect(item).toBeNull();
+        expect(mockFs.readdir.mock.calls).toHaveLength(1);
+        expect(mockFs.readdir.mock.calls[0][0]).toBe(
+          `${dataRootDir}/${subDir}`,
+        );
+      });
+    });
+
+    describe("when found item", () => {
+      it("returns item", () => {
+        const dataRootDir = "data_root_dir";
+        const subDir = "public";
+        const instance = new FileSystemRepo({ dataRootDir });
+        const basename = "abc";
+        const subject = () => {
+          return instance.loadItemByBasename(basename);
+        };
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        // cast any why jest.mock cannot treat overloaded type. they resolve forcefully last one.
+        mockFs.readdir.mockResolvedValueOnce([`${basename}.md`] as any[]);
+        const id = "this_is_id";
+        mockFs.readFile.mockResolvedValue(`---
+id: ${id}
+tags: []
+---`);
+
+        expect(mockFs.readdir.mock.calls).toHaveLength(0);
+        return subject().then((item) => {
+          expect(item?.id).toBe(id);
+          expect(mockFs.readdir.mock.calls).toHaveLength(1);
+          expect(mockFs.readdir.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}`,
+          );
+          expect(mockFs.readFile.mock.calls).toHaveLength(2);
+          expect(mockFs.readFile.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}/${basename}.md`,
+          );
+          expect(mockFs.readFile.mock.calls[1][0]).toBe(
+            `${dataRootDir}/${subDir}/.remote/${id}.md`,
+          );
+        });
+      });
+    });
+
+    describe("when posting campaign keys are absent in frontmatter", () => {
+      it("keeps them undefined", () => {
+        const instance = new FileSystemRepo({ dataRootDir: "data_root_dir" });
+        const basename = "abc";
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([`${basename}.md`] as any[]);
+        mockFs.readFile.mockResolvedValue(`---
+id: this_is_id
+tags: []
+---`);
+
+        return instance.loadItemByBasename(basename).then((item) => {
+          expect(item?.postingCampaignUuid).toBeUndefined();
+          expect(item?.agreedPostingCampaignTerm).toBeUndefined();
+        });
+      });
+
+      it("does not detect modification against remote data with default values", () => {
+        const instance = new FileSystemRepo({ dataRootDir: "data_root_dir" });
+        const basename = "abc";
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([`${basename}.md`] as any[]);
+        mockFs.readFile.mockResolvedValueOnce(`---
+title: title
+tags: []
+private: false
+id: this_is_id
+slide: false
+---
+body`);
+        mockFs.readFile.mockResolvedValueOnce(`---
+title: title
+tags: []
+private: false
+id: this_is_id
+slide: false
+posting_campaign_uuid: null
+agreed_posting_campaign_term: false
+---
+body`);
+
+        return instance.loadItemByBasename(basename).then((item) => {
+          expect(item?.modified).toBe(false);
+        });
+      });
+    });
+
+    describe("when only tag order differs from remote", () => {
+      it("detects modification", () => {
+        const instance = new FileSystemRepo({ dataRootDir: "data_root_dir" });
+        const basename = "abc";
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([`${basename}.md`] as any[]);
+        mockFs.readFile.mockResolvedValueOnce(`---
+title: title
+tags:
+  - Ruby
+  - Rails
+private: false
+id: this_is_id
+slide: false
+---
+body`);
+        mockFs.readFile.mockResolvedValueOnce(`---
+title: title
+tags:
+  - Rails
+  - Ruby
+private: false
+id: this_is_id
+slide: false
+---
+body`);
+
+        return instance.loadItemByBasename(basename).then((item) => {
+          expect(item?.modified).toBe(true);
+        });
+      });
+    });
+
+    describe("when tags are not empty", () => {
+      it("keeps tags in the order written in frontmatter", () => {
+        const instance = new FileSystemRepo({ dataRootDir: "data_root_dir" });
+        const basename = "abc";
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([`${basename}.md`] as any[]);
+        mockFs.readFile.mockResolvedValue(`---
+title: title
+tags:
+  - Ruby
+  - Rails
+private: false
+id: this_is_id
+slide: false
+---
+body`);
+
+        return instance.loadItemByBasename(basename).then((item) => {
+          expect(item?.modified).toBe(false);
+          expect(item?.tags).toStrictEqual(["Ruby", "Rails"]);
+        });
+      });
+    });
+
+    describe("when posting campaign keys are explicitly set in frontmatter", () => {
+      it("returns the explicit values", () => {
+        const instance = new FileSystemRepo({ dataRootDir: "data_root_dir" });
+        const basename = "abc";
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([`${basename}.md`] as any[]);
+        mockFs.readFile.mockResolvedValue(`---
+id: this_is_id
+tags: []
+posting_campaign_uuid: abcde12345fghij67890
+agreed_posting_campaign_term: true
+---`);
+
+        return instance.loadItemByBasename(basename).then((item) => {
+          expect(item?.postingCampaignUuid).toBe("abcde12345fghij67890");
+          expect(item?.agreedPostingCampaignTerm).toBe(true);
+        });
+      });
+
+      it("returns null for an explicit null", () => {
+        const instance = new FileSystemRepo({ dataRootDir: "data_root_dir" });
+        const basename = "abc";
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([`${basename}.md`] as any[]);
+        mockFs.readFile.mockResolvedValue(`---
+id: this_is_id
+tags: []
+posting_campaign_uuid: null
+agreed_posting_campaign_term: false
+---`);
+
+        return instance.loadItemByBasename(basename).then((item) => {
+          expect(item?.postingCampaignUuid).toBeNull();
+          expect(item?.agreedPostingCampaignTerm).toBe(false);
+        });
+      });
+    });
+  });
+
+  describe("loadItems", () => {
+    describe("when items does not exist", () => {
+      it("returns empty", () => {
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockImplementation(async (path) => {
+          switch (path) {
+            case `${dataRootDir}/${subDir}`:
+              return [];
+            default:
+              throw new Error(`Unexpected path: ${path}`);
+          }
+        });
+
+        const dataRootDir = "data_root_dir";
+        const subDir = "public";
+        const instance = new FileSystemRepo({ dataRootDir });
+        const subject = () => {
+          return instance.loadItems();
+        };
+
+        return subject().then((items) => {
+          expect(items).toStrictEqual([]);
+        });
+      });
+    });
+
+    describe("when items exists", () => {
+      it("returns items", () => {
+        const dataRootDir = "data_root_dir";
+        const subDir = "public";
+        const instance = new FileSystemRepo({ dataRootDir });
+        const subject = () => {
+          return instance.loadItems();
+        };
+
+        const generateItem = (suffix: string) => {
+          return {
+            basename: "basename_" + suffix,
+            id: "id_" + suffix,
+            content: `---
+id: id_${suffix}
+tags: []
+slide: false
+---`,
+          };
+        };
+        const item_a = generateItem("a");
+        const item_b = generateItem("b");
+
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockImplementation(async (path) => {
+          switch (path) {
+            case `${dataRootDir}/${subDir}`:
+              return [
+                `${item_a.basename}.md`,
+                `${item_b.basename}.md`,
+              ] as any[]; // cast any why jest.mock cannot treat overloaded type. they resolve forcefully last one.
+            default:
+              throw new Error(`Unexpected path: ${path}`);
+          }
+        });
+        mockFs.readFile.mockImplementation(async (path) => {
+          switch (path) {
+            case `${dataRootDir}/${subDir}/${item_a.basename}.md`:
+            case `${dataRootDir}/${subDir}/.remote/${item_a.id}.md`:
+              return item_a.content;
+            case `${dataRootDir}/${subDir}/${item_b.basename}.md`:
+            case `${dataRootDir}/${subDir}/.remote/${item_b.id}.md`:
+              return item_b.content;
+            default:
+              throw new Error(`Unexpected path: ${path}`);
+          }
+        });
+
+        return subject().then((items) => {
+          expect(items.map((item) => item?.id)).toStrictEqual([
+            item_a.id,
+            item_b.id,
+          ]);
+        });
+      });
+    });
+  });
+
+  describe("createItem()", () => {
+    describe("when basename is not given", () => {
+      it("saves item", () => {
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        // createItem() reads the directory twice: once to pick a free
+        // basename and once to check the basename is not taken.
+        mockFs.readdir.mockResolvedValue([]);
+        mockFs.writeFile.mockResolvedValueOnce();
+
+        const dataRootDir = "data_root_dir";
+        const subDir = "public";
+        const instance = new FileSystemRepo({ dataRootDir });
+        const subject = () => {
+          return instance.createItem();
+        };
+
+        return subject().then(() => {
+          expect(mockFs.readdir.mock.calls).toHaveLength(2);
+          expect(mockFs.writeFile.mock.calls).toHaveLength(1);
+          expect(mockFs.writeFile.mock.calls[0]).toHaveLength(3);
+          expect(mockFs.writeFile.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}/newArticle001.md`,
+          );
+          const { data } = matter(mockFs.writeFile.mock.calls[0][1] as string);
+          expect(data.id).toBeNull();
+        });
+      });
+    });
+
+    describe("when basename is given", () => {
+      it("saves item", () => {
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([]);
+        mockFs.writeFile.mockResolvedValueOnce();
+
+        const dataRootDir = "data_root_dir";
+        const subDir = "public";
+        const instance = new FileSystemRepo({ dataRootDir });
+        const subject = () => {
+          return instance.createItem("test01");
+        };
+
+        return subject().then(() => {
+          expect(mockFs.readdir.mock.calls).toHaveLength(1);
+          expect(mockFs.writeFile.mock.calls).toHaveLength(1);
+          expect(mockFs.writeFile.mock.calls[0]).toHaveLength(3);
+          expect(mockFs.writeFile.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}/test01.md`,
+          );
+          const { data } = matter(mockFs.writeFile.mock.calls[0][1] as string);
+          expect(data.id).toBeNull();
+        });
+      });
+    });
+  });
+
+  describe("saveItem()", () => {
+    const id = "this_is_id";
+    const dataRootDir = "data_root_dir";
+    const subDir = "public";
+    const instance = new FileSystemRepo({ dataRootDir });
+    const item: Item = {
+      body: "test",
+      id,
+      private: false,
+      coediting: false,
+      tags: [],
+      title: "title",
+      created_at: "",
+      updated_at: "",
+      organization_url_name: null,
+      slide: false,
+      posting_campaign_uuid: null,
+    };
+    const remoteFilename = `${id}.md`;
+    const localFilename = remoteFilename;
+    const itemBody = `---
+title: ${item.title}
+tags: []
+id: ${item.id}
+---
+${item.body}
+`;
+    const updatedItemBody = `---
+title: ${item.title}
+tags: []
+id: ${item.id}
+---
+updated
+`;
+    const subject = (
+      beforeSync: boolean = false,
+      forceUpdate: boolean = false,
+    ) => {
+      return instance.saveItem(item, beforeSync, forceUpdate);
+    };
+
+    describe("when local article does not exist", () => {
+      it("saves item local and remote", () => {
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([]);
+        mockFs.writeFile.mockResolvedValue();
+        mockFs.readFile.mockResolvedValue(itemBody);
+
+        return subject().then(() => {
+          expect(mockFs.readFile.mock.calls).toHaveLength(1);
+          expect(mockFs.writeFile.mock.calls).toHaveLength(2);
+          expect(mockFs.writeFile.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}/.remote/${remoteFilename}`,
+          );
+          expect(mockFs.writeFile.mock.calls[1][0]).toBe(
+            `${dataRootDir}/${subDir}/${localFilename}`,
+          );
+        });
+      });
+    });
+
+    describe("when local article exists", () => {
+      it("saves item remote", () => {
+        const mockFs = fs as jest.Mocked<typeof fs>;
+        mockFs.readdir.mockResolvedValueOnce([remoteFilename] as any[]);
+        mockFs.writeFile.mockResolvedValue();
+        mockFs.readFile.mockResolvedValueOnce(itemBody);
+        mockFs.readFile.mockResolvedValue(updatedItemBody);
+
+        return subject().then(() => {
+          expect(mockFs.readFile.mock.calls).toHaveLength(3);
+          expect(mockFs.writeFile.mock.calls).toHaveLength(1);
+          expect(mockFs.writeFile.mock.calls[0][0]).toBe(
+            `${dataRootDir}/${subDir}/.remote/${remoteFilename}`,
+          );
+        });
+      });
+
+      describe("when beforeSync is true", () => {
+        it("saves item remote", () => {
+          const mockFs = fs as jest.Mocked<typeof fs>;
+          mockFs.readdir.mockResolvedValueOnce([remoteFilename] as any[]);
+          mockFs.writeFile.mockResolvedValue();
+          mockFs.readFile.mockResolvedValueOnce(itemBody);
+          mockFs.readFile.mockResolvedValue(updatedItemBody);
+
+          return subject(true).then(() => {
+            expect(mockFs.readFile.mock.calls).toHaveLength(3);
+            expect(mockFs.writeFile.mock.calls).toHaveLength(2);
+            expect(mockFs.writeFile.mock.calls[0][0]).toBe(
+              `${dataRootDir}/${subDir}/.remote/${remoteFilename}`,
+            );
+            expect(mockFs.writeFile.mock.calls[1][0]).toBe(
+              `${dataRootDir}/${subDir}/.remote/${remoteFilename}`,
+            );
+          });
+        });
+      });
+
+      describe("when forceUpdate is true", () => {
+        it("saves item local and remote", () => {
+          const mockFs = fs as jest.Mocked<typeof fs>;
+          mockFs.readdir.mockResolvedValueOnce([localFilename] as any[]);
+          mockFs.readdir.mockResolvedValue([remoteFilename] as any[]);
+          mockFs.writeFile.mockResolvedValue();
+          mockFs.readFile.mockResolvedValueOnce(itemBody);
+          mockFs.readFile.mockResolvedValue(updatedItemBody);
+
+          return subject(false, true).then(() => {
+            expect(mockFs.readFile.mock.calls).toHaveLength(3);
+            expect(mockFs.writeFile.mock.calls).toHaveLength(2);
+            expect(mockFs.writeFile.mock.calls[0][0]).toBe(
+              `${dataRootDir}/${subDir}/.remote/${remoteFilename}`,
+            );
+            expect(mockFs.writeFile.mock.calls[1][0]).toBe(
+              `${dataRootDir}/${subDir}/${localFilename}`,
+            );
+          });
+        });
+      });
+    });
+  });
+
+  describe("loadPublishTargets()", () => {
+    it("returns the unpublished articles and the ones that differ from the mirror", async () => {
+      mockFileSystem({
+        [`${rootPath}/draft.md`]: articleFile(),
+        [`${rootPath}/edited.md`]: articleFile({
+          id: "edited-id",
+          body: "# Edited",
+        }),
+        [`${remotePath}/edited-id.md`]: articleFile({ id: "edited-id" }),
+        [`${rootPath}/synced.md`]: articleFile({ id: "synced-id" }),
+        [`${remotePath}/synced-id.md`]: articleFile({ id: "synced-id" }),
+      });
+      const instance = new FileSystemRepo({ dataRootDir });
+
+      const targets = await instance.loadPublishTargets();
+
+      expect(targets.map((item) => item.name).sort()).toStrictEqual([
+        "draft",
+        "edited",
+      ]);
+    });
+
+    it("skips an article whose ignorePublish is exactly true", async () => {
+      mockFileSystem({
+        [`${rootPath}/draft.md`]: articleFile({ ignorePublish: "true" }),
+      });
+      const instance = new FileSystemRepo({ dataRootDir });
+
+      expect(await instance.loadPublishTargets()).toStrictEqual([]);
+    });
+
+    it("does not skip an article whose ignorePublish is a truthy non-boolean", async () => {
+      mockFileSystem({
+        [`${rootPath}/draft.md`]: articleFile({ ignorePublish: "'yes'" }),
+      });
+      const instance = new FileSystemRepo({ dataRootDir });
+
+      const targets = await instance.loadPublishTargets();
+
+      expect(targets.map((item) => item.name)).toStrictEqual(["draft"]);
+    });
+  });
+
+  describe("publishItem()", () => {
+    describe("when the item has no id yet", () => {
+      it("posts it, writes the uuid back and then refreshes the mirror", async () => {
+        const files = mockFileSystem({
+          [`${rootPath}/article.md`]: articleFile(),
+        });
+        const qiitaApi = buildQiitaApi();
+        const responseItem = buildResponseItem();
+        qiitaApi.postItem.mockResolvedValue(responseItem);
+        const instance = new FileSystemRepo({ dataRootDir });
+
+        const result = await instance.publishItem(buildItem(), qiitaApi);
+
+        expect(qiitaApi.postItem).toHaveBeenCalledWith({
+          rawBody: "# Title",
+          tags: ["qiita"],
+          title: "Title",
+          isPrivate: false,
+          organizationUrlName: null,
+          slide: false,
+          postingCampaignUuid: null,
+          agreedPostingCampaignTerm: false,
+        });
+        expect(qiitaApi.patchItem).not.toHaveBeenCalled();
+        expect(result).toStrictEqual({ item: responseItem, posted: true });
+        // The uuid reaches the local file before the mirror is refreshed, so
+        // the mirror is written next to that basename instead of a new file.
+        expect(writtenPaths()).toStrictEqual([
+          `${rootPath}/article.md`,
+          `${remotePath}/new-item-id.md`,
+          `${rootPath}/article.md`,
+        ]);
+        expect(matter(files[`${rootPath}/article.md`]).data.id).toBe(
+          "new-item-id",
+        );
+      });
+    });
+
+    describe("when the item already has an id", () => {
+      it("patches it and refreshes the mirror without rewriting the uuid", async () => {
+        mockFileSystem({
+          [`${rootPath}/article.md`]: articleFile({ id: "existing-item-id" }),
+          [`${remotePath}/existing-item-id.md`]: articleFile({
+            id: "existing-item-id",
+          }),
+        });
+        const qiitaApi = buildQiitaApi();
+        const responseItem = buildResponseItem({ id: "existing-item-id" });
+        qiitaApi.patchItem.mockResolvedValue(responseItem);
+        const instance = new FileSystemRepo({ dataRootDir });
+
+        const result = await instance.publishItem(
+          buildItem({ id: "existing-item-id", published: true }),
+          qiitaApi,
+        );
+
+        expect(qiitaApi.patchItem).toHaveBeenCalledWith({
+          rawBody: "# Title",
+          tags: ["qiita"],
+          title: "Title",
+          uuid: "existing-item-id",
+          isPrivate: false,
+          organizationUrlName: null,
+          slide: false,
+          postingCampaignUuid: null,
+          agreedPostingCampaignTerm: false,
+        });
+        expect(qiitaApi.postItem).not.toHaveBeenCalled();
+        expect(result).toStrictEqual({ item: responseItem, posted: false });
+        expect(writtenPaths()).toStrictEqual([
+          `${remotePath}/existing-item-id.md`,
+          `${rootPath}/article.md`,
+        ]);
+      });
+    });
+  });
+
+  describe("with slides in the same directory", () => {
+    const slideFile = `---
+title: Deck
+id: slide-uuid
+updated_at: null
+description: null
+marp: true
+---
+# Deck
+`;
+
+    beforeEach(() => {
+      mockFileSystem({
+        [`${rootPath}/article.md`]: articleFile({ id: "item-id" }),
+        [`${rootPath}/deck.md`]: slideFile,
+        [`${rootPath}/slides/nested-deck.md`]: slideFile,
+        [`${remotePath}/slide-uuid.md`]: slideFile,
+      });
+    });
+
+    it("excludes the slides from the item list", async () => {
+      const instance = new FileSystemRepo({ dataRootDir });
+
+      const items = await instance.loadItems();
+
+      expect(items.map((item) => item.name)).toStrictEqual(["article"]);
+    });
+
+    it("does not load a slide by its basename", async () => {
+      const instance = new FileSystemRepo({ dataRootDir });
+
+      expect(
+        await instance.loadItemByBasename("slides/nested-deck"),
+      ).toBeNull();
+    });
+
+    it("does not load a slide by its id", async () => {
+      const instance = new FileSystemRepo({ dataRootDir });
+
+      expect(await instance.loadItemByItemId("slide-uuid")).toBeNull();
+    });
+
+    it("does not overwrite a slide with a new item", async () => {
+      const instance = new FileSystemRepo({ dataRootDir });
+
+      expect(await instance.createItem("deck")).toBeUndefined();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("getRootPath()", () => {
+    it("returns the root path", () => {
+      const dataRootDir = "./tmp";
+      const instance = new FileSystemRepo({ dataRootDir });
+      expect(instance.getRootPath()).toBe(`tmp/public`);
+    });
+  });
+});

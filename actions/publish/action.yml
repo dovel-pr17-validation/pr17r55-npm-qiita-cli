@@ -1,0 +1,43 @@
+name: "Publish articles to Qiita"
+description: "Publish articles to Qiita using qiita-cli"
+author: "Qiita Inc."
+
+inputs:
+  root:
+    required: false
+    default: "."
+    description: "Root directory path"
+  qiita-token:
+    required: true
+    description: "Qiita API token"
+  commit-message:
+    required: false
+    description: "Git commit message"
+    default: "Updated by qiita-cli"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: "24"
+    - name: Install qiita-cli
+      run: npm install -g @qiita/qiita-cli@v1.12.0
+      shell: bash
+    - name: Publish articles
+      run: qiita publish --all --root ${{ inputs.root }}
+      env:
+        QIITA_TOKEN: ${{ inputs.qiita-token }}
+      shell: bash
+    - name: Commit and push diff # Not executed recursively even if `push` is triggered. See https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow
+      run: |
+        git add ${{ inputs.root }}/public/*
+        if ! git diff --staged --exit-code --quiet; then
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "${COMMIT_MESSAGE}"
+          git push
+        fi
+      shell: bash
+      env:
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
